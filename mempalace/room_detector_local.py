@@ -9,11 +9,14 @@ Two ways to define rooms without calling any AI:
 No internet. No API key. Your files stay on your machine.
 """
 
+import logging
 import os
 import sys
 import yaml
 from pathlib import Path
 from collections import defaultdict
+
+logger = logging.getLogger(__name__)
 
 # Common room patterns — detected from folder names and filenames
 # Format: {folder_keyword: room_name}
@@ -118,7 +121,12 @@ def detect_rooms_from_folders(project_dir: str) -> list:
 
     # Check top-level directories first (most reliable signal)
     for item in project_path.iterdir():
-        if item.is_dir() and item.name not in SKIP_DIRS:
+        try:
+            is_dir = item.is_dir()  # WinError 448 — reparse point / untrusted mount point
+        except OSError as exc:
+            logger.debug("Skipping %s: %s", item, exc)
+            continue
+        if is_dir and item.name not in SKIP_DIRS:
             name_lower = item.name.lower().replace("-", "_")
             if name_lower in FOLDER_ROOM_MAP:
                 room_name = FOLDER_ROOM_MAP[name_lower]
@@ -132,9 +140,28 @@ def detect_rooms_from_folders(project_dir: str) -> list:
 
     # Walk one level deeper for nested patterns
     for item in project_path.iterdir():
-        if item.is_dir() and item.name not in SKIP_DIRS:
-            for subitem in item.iterdir():
-                if subitem.is_dir() and subitem.name not in SKIP_DIRS:
+        try:
+            item_is_dir = item.is_dir()  # WinError 448 — reparse point / untrusted mount point
+        except OSError as exc:
+            logger.debug("Skipping %s: %s", item, exc)
+            continue
+        if item_is_dir and item.name not in SKIP_DIRS:
+            try:
+                subitems = list(
+                    item.iterdir()
+                )  # WinError 448 — iterdir can also fail on some reparse points
+            except OSError as exc:
+                logger.debug("Skipping contents of %s: %s", item, exc)
+                continue
+            for subitem in subitems:
+                try:
+                    subitem_is_dir = (
+                        subitem.is_dir()
+                    )  # WinError 448 — reparse point / untrusted mount point
+                except OSError as exc:
+                    logger.debug("Skipping %s: %s", subitem, exc)
+                    continue
+                if subitem_is_dir and subitem.name not in SKIP_DIRS:
                     name_lower = subitem.name.lower().replace("-", "_")
                     if name_lower in FOLDER_ROOM_MAP:
                         room_name = FOLDER_ROOM_MAP[name_lower]
@@ -175,7 +202,7 @@ def detect_rooms_from_files(project_dir: str) -> list:
 
     SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
 
-    for root, dirs, filenames in os.walk(project_path):
+    for _root, dirs, filenames in os.walk(project_path):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for filename in filenames:
             name_lower = filename.lower().replace("-", "_").replace(" ", "_")
@@ -205,14 +232,14 @@ def detect_rooms_from_files(project_dir: str) -> list:
 
 def print_proposed_structure(project_name: str, rooms: list, total_files: int, source: str):
     print(f"\n{'=' * 55}")
-    print("  MemPalace Init — Local setup")
+    print("  MemPalace Init -- Local setup")
     print(f"{'=' * 55}")
     print(f"\n  WING: {project_name}")
     print(f"  ({total_files} files found, rooms detected from {source})\n")
     for room in rooms:
         print(f"    ROOM: {room['name']}")
         print(f"          {room['description']}")
-    print(f"\n{'─' * 55}")
+    print(f"\n{'-' * 55}")
 
 
 def get_user_approval(rooms: list) -> list:
@@ -232,7 +259,7 @@ def get_user_approval(rooms: list) -> list:
     if choice == "edit":
         print("\n  Current rooms:")
         for i, room in enumerate(rooms):
-            print(f"    {i + 1}. {room['name']} — {room['description']}")
+            print(f"    {i + 1}. {room['name']} -- {room['description']}")
         remove = input("\n  Room numbers to REMOVE (comma-separated, or enter to skip): ").strip()
         if remove:
             to_remove = {int(x.strip()) - 1 for x in remove.split(",") if x.strip().isdigit()}
@@ -265,7 +292,12 @@ def save_config(project_dir: str, project_name: str, rooms: list):
         ],
     }
     config_path = Path(project_dir).expanduser().resolve() / "mempalace.yaml"
-    with open(config_path, "w") as f:
+    # Opening a pre-existing FIFO for writing blocks in the kernel until a
+    # reader appears. Only a regular file is a valid config target; refuse
+    # loudly rather than park ``init`` with no output.
+    if config_path.exists() and not config_path.is_file():
+        raise OSError(f"Refusing to write config: {config_path} is not a regular file")
+    with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
     print(f"\n  Config saved: {config_path}")
@@ -276,8 +308,10 @@ def save_config(project_dir: str, project_name: str, rooms: list):
 
 def detect_rooms_local(project_dir: str, yes: bool = False):
     """Main entry point for local setup."""
+    from .config import normalize_wing_name
+
     project_path = Path(project_dir).expanduser().resolve()
-    project_name = project_path.name.lower().replace(" ", "_").replace("-", "_")
+    project_name = normalize_wing_name(project_path.name)
 
     if not project_path.exists():
         print(f"ERROR: Directory not found: {project_dir}")
