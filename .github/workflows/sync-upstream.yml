@@ -38,7 +38,7 @@ jobs:
           git merge --no-commit --no-ff -X ours upstream/main
           git show upstream/main:.gitignore > .gitignore
           printf '\n# Local Nix build results\nresult\nresult-*\n' >> .gitignore
-          printf '{"$schema":"https://docs.renovatebot.com/renovate-schema.json","enabled":false}\n' > renovate.json
+          cp "$GITHUB_WORKSPACE/renovate.json" renovate.json
           if git cat-file -e upstream/main:.github/dependabot.yml; then
             git show upstream/main:.github/dependabot.yml > .github/dependabot.yml
             sed -i -E 's/(open-pull-requests-limit:) *[0-9]+/\1 0/' .github/dependabot.yml
