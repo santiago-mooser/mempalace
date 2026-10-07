@@ -1,0 +1,55 @@
+name: Sync upstream
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Merge upstream while preserving fork policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/MemPalace/mempalace.git
+          git fetch --no-tags upstream main
+          if git merge-base --is-ancestor upstream/main origin/main; then
+            echo 'Fork already contains upstream main'
+            exit 0
+          fi
+          sync_path="$(dirname "$GITHUB_WORKSPACE")/mempalace-upstream-sync"
+          git worktree add --detach "$sync_path" origin/main
+          cd "$sync_path"
+          git pull --rebase origin main
+          git merge --no-commit --no-ff -X ours upstream/main
+          git show upstream/main:.gitignore > .gitignore
+          printf '\n# Local Nix build results\nresult\nresult-*\n' >> .gitignore
+          printf '{"$schema":"https://docs.renovatebot.com/renovate-schema.json","enabled":false}\n' > renovate.json
+          if git cat-file -e upstream/main:.github/dependabot.yml; then
+            git show upstream/main:.github/dependabot.yml > .github/dependabot.yml
+            sed -i -E 's/(open-pull-requests-limit:) *[0-9]+/\1 0/' .github/dependabot.yml
+          fi
+          git add .gitignore renovate.json .github/dependabot.yml
+          git diff --cached --exit-code upstream/main -- mempalace tests pyproject.toml uv.lock Dockerfile Dockerfile.gpu
+          git commit -m 'chore: sync MemPalace upstream main'
+          git push origin HEAD:refs/heads/automation/sync-upstream-main
+          printf 'Synchronize upstream main while preserving Nix files and disabled independent dependency updates. Application source and its lockfile match upstream.\n' > "$RUNNER_TEMP/sync-body.txt"
+          pr=$(gh pr list --head automation/sync-upstream-main --base main --json number --jq '.[0].number // empty')
+          if [[ -z "$pr" ]]; then
+            pr=$(gh pr create --head automation/sync-upstream-main --base main --title 'chore: sync MemPalace upstream main' --body-file "$RUNNER_TEMP/sync-body.txt")
+          fi
+          gh pr merge "$pr" --merge
